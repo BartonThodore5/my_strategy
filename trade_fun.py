@@ -39,7 +39,7 @@ def calculate_time_ratio(current_time):
     return minutes / 240
 
 # 保持原有的trade函数不变，但修改参数以适应并行处理
-def trade(code_list,trade_date:dt.date,fee_rate = 0.005,need_adj=True,stop_loss_pct=0.09):
+def trade(code_list,trade_date:dt.date,fee_rate = 0.004,need_adj=True,stop_loss_pct=0.09):
     """
     并行处理的单个交易任务
     params包含: code_list, trade_date, interval参数等
@@ -82,7 +82,7 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.005,need_adj=True,stop_loss_
         mins_data = mins_data.drop_nulls(subset=['open', 'close', 'pre_close', 'limit_up', 'limit_down'])
         
     except Exception as e:
-        logging.info(f"获取{code}数据失败: {str(e)}")
+        logging.info(f"获取{code_list}数据失败: {str(e)}")
         return None
     
     # 2. 回测，买入和卖出逻辑
@@ -168,7 +168,236 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.005,need_adj=True,stop_loss_
             
             # 检查每个目标时间点
             for row in code_daily_data.iter_rows(named=True):
-                current_price = row['close']
+                current_price = row['open']
+                current_time = row['datetime'].time()
+                open_pct = (row['open']/row['pre_close']-1) *100
+                # 计算当天持有时间比例并得到总持有天数
+                same_day_ratio = calculate_time_ratio(current_time)
+                total_holding_days = round(full_days + same_day_ratio, 2)
+                adj = row['adj'] if 'adj' in row.keys() else 1
+                # 计算全天振幅
+                amplitude = (row['high'] - row['low']) / pre_close * 100
+
+                # 1. 9:30 第二天开盘大幅低开
+                if open_pct <=-7 and current_time==target_time[0]:
+                    # 如果跌停并且最高价也跌停则无法卖出
+                    if current_price<=limit_down: 
+                        if row['high']<=limit_down:
+                            continue
+                    # 否则可以卖出
+                    buy_price_fee = trade_info['buy_price']* buy_adj * (1 + fee_rate)
+                    sell_price_fee = current_price* adj * (1 - fee_rate)
+                    profit = (sell_price_fee - buy_price_fee) / buy_price_fee * 100
+                    trade_info.update({
+                        'sell_time': datetime.combine(row['trading_date'],current_time),
+                        'sell_price': current_price,
+                        'profit': profit,
+                        'holding_days':total_holding_days,
+                        'sell_reason': '大幅低开卖出'
+                    })
+                    sell_triggered = True
+                    break
+
+                # 跌停无法卖出
+                if current_price<=limit_down: 
+                    continue
+                # 如果全天振幅小,那么持有
+                if amplitude <=4:
+                    continue
+
+                # 2. 止损条件：价格低于买入价的1-stop_loss_pct
+                if trade_info['buy_price'] and current_price <= trade_info['buy_price'] * (1-stop_loss_pct) and current_time!=target_time[0]:
+                    buy_price_fee = trade_info['buy_price']* buy_adj * (1 + fee_rate)
+                    sell_price_fee = current_price* adj * (1 - fee_rate)
+                    profit = (sell_price_fee - buy_price_fee) / buy_price_fee * 100
+                    trade_info.update({
+                        'sell_time': datetime.combine(row['trading_date'],current_time),
+                        'sell_price': current_price,
+                        'profit': profit,
+                        'holding_days':total_holding_days,
+                        'sell_reason': '止损卖出'
+                    })
+                    sell_triggered = True
+                    break
+                    
+                # 3. 止盈/正常卖出条件：未涨停且在目标时间点
+                if current_price < limit_up * 0.97 and current_time in target_time[1:]:
+                    buy_price_fee = trade_info['buy_price']* buy_adj * (1 + fee_rate)
+                    sell_price_fee = current_price* adj * (1 - fee_rate)
+                    profit = (sell_price_fee - buy_price_fee) / buy_price_fee * 100
+                    trade_info.update({
+                        'sell_time': datetime.combine(row['trading_date'],current_time),
+                        'sell_price': current_price,
+                        'profit': profit,
+                        'holding_days':total_holding_days,
+                        'sell_reason': '未涨停卖出'
+                    })
+                    sell_triggered = True
+                    break
+
+
+            if sell_triggered: # 已经完成卖出逻辑,无需循环
+                break
+
+        # 如果未触发卖出条件，在最后一天收盘价卖出
+        if not trade_info['sell_time']:
+            final_day_data = code_mins_data.filter(pl.col("trading_date") == end_date)
+            adj = final_day_data['adj'][0] if 'adj' in final_day_data.columns else 1
+            if final_day_data.height > 0:
+                sell_price = final_day_data['close'].to_list()[-1]
+                final_time = final_day_data['datetime'].to_list()[-1].time()
+
+                # 计算持有天数
+                full_days = trading_date_list.index(end_date) - buy_date_index
+                same_day_ratio = calculate_time_ratio(final_time)
+                total_holding_days = round(full_days + same_day_ratio, 2)
+                if trade_info['buy_price']:
+                    buy_price_fee = trade_info['buy_price']* buy_adj * (1 + fee_rate)
+                    sell_price_fee = sell_price * adj * (1 - fee_rate)
+                    profit = (sell_price_fee - buy_price_fee) / buy_price_fee * 100
+                    trade_info['profit'] = profit
+                trade_info.update({
+                    'sell_time':datetime.combine(end_date,final_time),
+                    'sell_price': sell_price,
+                    'holding_days': total_holding_days,
+                    'sell_reason': '最后卖出'
+                })
+
+        result.append(trade_info)
+    
+    duration = Time.time() - start_process_time
+    #logging.info(f"完成回测日期: {trade_date}, 股票数量: {len(code_list)}, 用时: {duration:.2f}秒")
+    return result
+
+def limit_up_trade(code_list,trade_date,fee_rate = 0.004,need_adj=True,stop_loss_pct=0.09):
+    """
+    抓涨停交易,对传入的股票进行监控回测交易,当快要触及涨停时买入，卖出逻辑同trade函数
+
+    """
+    from datetime import datetime, timedelta, time
+    start_date = trade_date
+    end_date = start_date + timedelta(days=15)
+    # 1.获取数据
+    try:
+        # 获取分钟线数据
+        stock_data = read_day_data(start_date,end_date,code_list,file_path='ts_stock_all_data')
+        
+        # 获取日线数据（用于补充pre_close, limit_up等字段）
+        mins_data = read_min_data(start_date,end_date,code_list)
+        
+        # 获取复权因子数据
+        if need_adj:
+            adj_data = read_day_data(start_date,end_date,code_list,file_path='ts_adj')
+            stock_data = stock_data.join(
+                adj_data[['trading_date', 'code', 'adj_factor']],
+                on=['trading_date', 'code'],
+                how='left',
+            )
+            # 改名为adj
+            stock_data = stock_data.rename({'adj_factor': 'adj'})
+
+        # 合并日线字段到分钟线数据
+        fields_to_merge = ['pre_close', 'limit_up', 'limit_down']
+        if need_adj:
+            fields_to_merge+=['adj'] 
+        mins_data = mins_data.join(
+            stock_data[['trading_date', 'code'] + fields_to_merge],
+            on=['trading_date', 'code'],
+            how='left',
+        )
+        mins_data = mins_data.drop_nulls(subset=['open', 'close', 'pre_close', 'limit_up', 'limit_down'])
+    except Exception as e:
+        logging.info(f"获取{code_list}数据失败: {str(e)}")
+        return None
+
+    result = []
+    # 遍历code列表,code_data
+    for code in code_list: 
+        code_mins_data = mins_data.filter(pl.col("code") == code)
+        # 1.初始化交易信息
+        trade_info = {
+            'code': code, 
+            'buy_time': None, 
+            'buy_price': None, 
+            'sell_time': None, 
+            'sell_price': None, 
+            'profit': None,
+            'holding_days': None,
+            'sell_reason': None # 卖出原因
+        }
+        if code_mins_data.height == 0:
+            logging.info(f"获取{code}在{start_date} 到 {end_date}股票数据失败")
+            return None
+        # 获取交易日期列表,遍历code_data中的交易日期
+        trading_date_list = sorted(code_mins_data['trading_date'].unique().to_list())
+        if not trading_date_list:
+            return None
+        
+        buy_date = trading_date_list[0]
+        
+        # 2. 买入逻辑（当价格触及涨停前1%时买入）
+        buy_triggered = False
+        buy_adj = None
+
+        # 买点目标时间
+        target_time = [time(10, 0), time(10, 30), time(13, 30)]
+        buy_data = code_mins_data.filter(
+            (pl.col("trading_date") == buy_date) &
+            (pl.col("datetime").dt.time().is_in(target_time))
+        )
+        
+        for row in buy_data.iter_rows(named=True):
+            limit_up = row['limit_up']
+            current_price = row['open']
+            current_time = row['datetime'].time()
+            adj = row['adj'] if 'adj' in row.keys() else 1
+
+            # 当价格触及涨停前2%时买入
+            if current_price >= limit_up * 0.98:
+                trade_info['buy_time'] = datetime.combine(row['trading_date'],current_time)
+                trade_info['buy_price'] = current_price
+                buy_adj = adj
+                buy_triggered = True
+                break
+        
+        if not buy_triggered:
+            # 未触发买入条件，跳过该股票
+            continue
+
+        buy_date_index = trading_date_list.index(buy_date) # 记录买入日期索引，计算持有天数用
+        
+        # 3. 卖出逻辑同trade函数
+        # ...（与trade函数中的卖出逻辑相同，此处省略以节省篇幅）
+        # 可将trade函数中的卖出逻辑提取为单独
+        target_time = [time(9, 30), time(11, 30), time(15, 00)]
+        end_date = trading_date_list[-1]
+        sell_triggered = False
+
+        ## 取后一天T+1,遍历信号票的每一天特定时间检测卖出
+        for i,single_date in enumerate(trading_date_list[1:]): 
+            #single_date_str = str(single_date)
+            full_days = (i+1)
+            code_daily_data = code_mins_data.filter(
+                (pl.col("trading_date") == single_date) &
+                (pl.col("datetime").dt.time().is_in(target_time))
+            )
+            
+            if code_daily_data.height == 0:
+                continue
+                
+            # 获取当日的涨停价和前收盘价
+            limit_up = code_daily_data['limit_up'].to_list()[0]
+            pre_close = code_daily_data['pre_close'].to_list()[0]
+            limit_down  = code_daily_data['limit_down'].to_list()[0]
+
+            # 剔除一字涨停情况（low>=limit_up）
+            if code_daily_data.filter(pl.col("low") >= limit_up).height > 0:
+                #logging.info(f"{code}在{single_date}日为一字涨停，跳过该日买入")
+                continue
+            
+            # 检查每个目标时间点
+            for row in code_daily_data.iter_rows(named=True):
+                current_price = row['open']
                 current_time = row['datetime'].time()
                 open_pct = (row['open']/row['pre_close']-1) *100
                 # 计算当天持有时间比例并得到总持有天数
@@ -260,9 +489,9 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.005,need_adj=True,stop_loss_
 
         result.append(trade_info)
     
-    duration = Time.time() - start_process_time
     #logging.info(f"完成回测日期: {trade_date}, 股票数量: {len(code_list)}, 用时: {duration:.2f}秒")
     return result
+
 
 
 def cal_trade_info(信号文件:pd, trade_fun=trade,start_date: str = None, end_date: str = None):
@@ -423,7 +652,7 @@ def cal_trade_info(信号文件:pd, trade_fun=trade,start_date: str = None, end_
     return  pd.DataFrame(valid_results), merged_df
 
 # 取sell_date为前n个窗口的股票表现与平均水平进行对比。高于平均水平并且昨日的股票触及跌停达到一定比率，则仓位调整为min_weight
-def adjust_weight_by_near_n(回测结果, max_weight=0.4, min_weight=0, window=20, down_limit_ratio=0.35,win_rate_threshold=0.43, profit_loss_ratio_threshold=1.3):
+def adjust_weight_by_near_n(回测结果, max_weight=0.4, min_weight=0, window=20, down_limit_ratio=0.35,win_rate_threshold=0.43, profit_loss_ratio_threshold=1.3, return_column='weight'):
     """
     adjust_weight_by_near_n 调整仓位逻辑:
     
@@ -511,17 +740,17 @@ def adjust_weight_by_near_n(回测结果, max_weight=0.4, min_weight=0, window=2
             date_weight.append((current_date, max_weight))
     
     # 合并权重数据并清理临时列
-    weight_df = pl.DataFrame(date_weight, schema=['trading_date', 'weight'])
+    weight_df = pl.DataFrame(date_weight, schema=['trading_date', return_column])
     回测结果 = 回测结果.join(weight_df, on='trading_date', how='left')
     
     # 4.汇报调整正确率以及调整绩效(调整后减亏比例=(max_weight-min_weight)*(-profit).mean() )
-    total_adjusted = weight_df.filter(pl.col('weight') == min_weight).height # 调整天数
+    total_adjusted = weight_df.filter(pl.col(return_column) == min_weight).height # 调整天数
     merged_with_weight = 回测结果.join(weight_df, on='trading_date', how='left')
     if total_adjusted == 0:
         adjust_success_rate = 0.0
         total_profit_loss_improvement = 0.0
     else:
-        adjusted_trades = merged_with_weight.filter(pl.col('weight') == min_weight)
+        adjusted_trades = merged_with_weight.filter(pl.col(return_column) == min_weight)
         losing_trades = adjusted_trades.filter(pl.col('profit') < 0)
         total_losing_trades = losing_trades.height
         if total_losing_trades == 0:
@@ -534,6 +763,80 @@ def adjust_weight_by_near_n(回测结果, max_weight=0.4, min_weight=0, window=2
             total_profit_loss_improvement = (max_weight - min_weight) * (-losing_trades['profit']).mean() 
     logging.info(f"总调整天数: {total_adjusted}, 调整正确率: {adjust_success_rate:.2f}%, 预计平均亏损改善: {total_profit_loss_improvement:.4f}%")
     return 回测结果.drop('sell_date')
+
+# 连续亏损调整仓位函数
+def adjust_weight_by_consecutive_losses(回测结果, max_weight=0.4, min_weight=0, loss_streak_threshold=3,return_column='weight_consec_loss'):
+    """
+    adjust_weight_by_consecutive_losses 连续亏损调整仓位逻辑:
+    :param 回测结果: 回测结果pl.DataFrame或pd.DataFrame，包含交易记录
+    :param max_weight: 每日的最大仓位
+    :param min_weight: 每日的最小仓位
+    :param loss_streak_threshold: 连续亏损天数阈值,默认连续亏损3日减仓一日
+    """
+    import polars as pl
+    if isinstance(回测结果, pd.DataFrame):
+        回测结果 = pl.from_pandas(回测结果)
+    
+    # 按trading_date排序
+    回测结果 = 回测结果.sort('trading_date')
+    # 获取唯一的交易日期列表
+    trading_dates = 回测结果['trading_date'].unique().to_list()
+    
+    # 生成「日期-权重」映射表（每个日期对应一个权重）
+    date_weight = []
+    consecutive_losses = 0  # 连续亏损计数器
+    
+    for i, current_date in enumerate(trading_dates):
+        if i == 0:
+            # 第一天，默认最大仓位
+            date_weight.append((current_date, max_weight))
+            continue
+        
+        previous_date = trading_dates[i - 1]
+        previous_day_data = 回测结果.filter(pl.col('trading_date') == previous_date)
+        
+        # 计算昨日的平均利润
+        avg_profit = previous_day_data['profit'].mean() if previous_day_data.height > 0 else 0.0
+        
+        # 判断昨日是否亏损
+        if avg_profit < 0:
+            consecutive_losses += 1
+        else:
+            consecutive_losses = 0  # 重置计数器
+        
+        # 根据连续亏损天数调整今日仓位
+        if consecutive_losses >= loss_streak_threshold:
+            date_weight.append((current_date, min_weight))
+        else:
+            date_weight.append((current_date, max_weight))
+    
+    # 将日期-权重映射转为DataFrame
+    weight_df = pl.DataFrame(date_weight, schema=['trading_date', return_column])
+    
+    # 通过trading_date关联，给每天的所有股票赋当天的权重
+    回测结果 = 回测结果.join(weight_df, on='trading_date', how='left')
+    
+    # 汇报调整正确率以及调整绩效
+    total_adjusted = weight_df.filter(pl.col(return_column) == min_weight).height # 调整天数
+    merged_with_weight = 回测结果.join(weight_df, on='trading_date', how='left')
+    if total_adjusted == 0:
+        adjust_success_rate = 0.0
+        total_profit_loss_improvement = 0.0
+    else:
+        adjusted_trades = merged_with_weight.filter(pl.col(return_column) == min_weight)
+        losing_trades = adjusted_trades.filter(pl.col('profit') < 0)
+        total_losing_trades = losing_trades.height
+        if total_losing_trades == 0:
+            adjust_success_rate = 1.0  # 全部调整成功
+            total_profit_loss_improvement = 0.0
+        else:
+            # 亏损交易调成min_weight即为正确调整
+            adjust_success_rate = total_losing_trades / adjusted_trades.height*100
+            # 计算总的改善比例
+            total_profit_loss_improvement = (max_weight - min_weight) * (-losing_trades['profit']).mean() 
+    logging.info(f"总调整天数: {total_adjusted}, 调整正确率: {adjust_success_rate:.2f}%, 预计平均亏损改善: {total_profit_loss_improvement:.4f}%")
+    return 回测结果
+
 
 # 动态调整仓位函数
 def mark_weight(回测结果, max_weight=0.4, min_weight=0.3):
@@ -596,7 +899,7 @@ def report_backtest_full(
     buy_date_col:str = 'buy_time',
     sell_date_col: str = 'buy_time',
     holding_days_col:str = 'holding_days',
-    benchmark_code: str = "399300.SZ",
+    benchmark_code: str = "SHSE.000001",
     risk_free_rate: float = 0.02,
     return_method = 'compound',
     plot = True,
@@ -641,7 +944,7 @@ def report_backtest_full(
 
     # 2. 获取指数净值曲线
     api = stock_api()
-    index_data = api.gm_get_index_day_data(index_code='SHSE.000001',start_date=start_date.strftime('%Y-%m-%d'),end_date=end_date.strftime('%Y-%m-%d'))
+    index_data = api.gm_get_index_day_data(index_code=benchmark_code,start_date=start_date.strftime('%Y-%m-%d'),end_date=end_date.strftime('%Y-%m-%d'))
     # index_data = ts.index_daily(ts_code=convert_code_format(benchmark_code,format='suffix'), start_date=start_date.strftime('%Y%m%d'), end_date=end_date.strftime('%Y%m%d'))
     # index_data = clean_stocks_data(index_data)
     index_df = index_data

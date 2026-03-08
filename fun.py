@@ -166,6 +166,21 @@ def read_day_data(start_date,end_date,stock_list=None,fields=None,file_path='ts_
         df = df.select(fields)
     return df.collect()
 
+# 获取交易日列表(根据日线数据目录即可获取)
+def get_data_trading_days(start_date,end_date,file_path='ts_stock_all_data') -> list:
+    """
+    获取交易日列表
+    start_date,end_date:datetime.date对象
+    file_path:parquet文件路径
+    返回:交易日列表,格式为datetime.date对象列表
+    """
+    file_path = os.path.join(DATA_ROOT_DIR, file_path)
+    start_date = convert_date_format(start_date,to_format='date')
+    end_date = convert_date_format(end_date,to_format='date')
+    df =pl.scan_parquet(file_path).filter(pl.col("trading_date").is_between(start_date,end_date))
+    trading_days = df.select(pl.col("trading_date").unique().sort()).collect()
+    trading_days_list = trading_days["trading_date"].to_list()
+    return trading_days_list
 #%% 计算特征函数
 def mark_limit_status(stock_data: pl.DataFrame,db_days=2) -> pl.DataFrame:
     """

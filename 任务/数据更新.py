@@ -85,7 +85,7 @@ day = api.ts_get_stocks_data(start_date='2025-12-10',end_date=today.strftime('%Y
 day = pl.from_pandas(day)
 update_day_data(day,save_dir='ts_stock_all_data')
 
-#%% 更新复权因子数据
+#%% 更新复权因子数据                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 def update_adj_factor_data(start_date='2021-01-01',end_date=None,save_dir='ts_adj',mode='insert'):
     """
     更新复权因子数据
