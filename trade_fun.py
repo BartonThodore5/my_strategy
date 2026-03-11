@@ -165,6 +165,10 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.004,need_adj=True,stop_loss_
             limit_up = code_daily_data['limit_up'].to_list()[0]
             pre_close = code_daily_data['pre_close'].to_list()[0]
             limit_down  = code_daily_data['limit_down'].to_list()[0]
+            # 计算全天振幅
+            high_price = code_daily_data['high'].max()
+            low_price = code_daily_data['low'].min()
+            amplitude = (high_price - low_price) / pre_close * 100
             
             # 检查每个目标时间点
             for row in code_daily_data.iter_rows(named=True):
@@ -175,8 +179,6 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.004,need_adj=True,stop_loss_
                 same_day_ratio = calculate_time_ratio(current_time)
                 total_holding_days = round(full_days + same_day_ratio, 2)
                 adj = row['adj'] if 'adj' in row.keys() else 1
-                # 计算全天振幅
-                amplitude = (row['high'] - row['low']) / pre_close * 100
 
                 # 1. 9:30 第二天开盘大幅低开
                 if open_pct <=-7 and current_time==target_time[0]:
@@ -201,9 +203,10 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.004,need_adj=True,stop_loss_
                 # 跌停无法卖出
                 if current_price<=limit_down: 
                     continue
+
                 # 如果全天振幅小,那么持有
-                if amplitude <=4:
-                    continue
+                # if amplitude <=4 and total_holding_days <=3:
+                #     continue
 
                 # 2. 止损条件：价格低于买入价的1-stop_loss_pct
                 if trade_info['buy_price'] and current_price <= trade_info['buy_price'] * (1-stop_loss_pct) and current_time!=target_time[0]:
@@ -220,6 +223,7 @@ def trade(code_list,trade_date:dt.date,fee_rate = 0.004,need_adj=True,stop_loss_
                     sell_triggered = True
                     break
                     
+
                 # 3. 止盈/正常卖出条件：未涨停且在目标时间点
                 if current_price < limit_up * 0.97 and current_time in target_time[1:]:
                     buy_price_fee = trade_info['buy_price']* buy_adj * (1 + fee_rate)

@@ -1,5 +1,4 @@
 # 画图函数
-
 def plot_interactive_kline(df, title='K线图', add_line_list=['sma_5','sma_10','sma_20']):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -204,3 +203,163 @@ def plot_interactive_kline(df, title='K线图', add_line_list=['sma_5','sma_10',
 
     # 显示图像
     fig.show()
+
+def plot_interactive_curve(df, title="净值折线图",max_ticks=20):
+    import pandas as pd
+    import plotly.graph_objects as go
+    """
+    直接基于宽格式DataFrame绘制可交互折线图（每列一条线，无需转长格式）
+    参数：
+        df: 输入DataFrame（索引为x轴，每列为一条折线）
+        title: 图表标题（可选）
+    """
+    x_categories = df.index.astype(str)  # 日期转字符串，作为分类轴
+    # 初始化绘图对象
+    fig = go.Figure()
+    
+    # 遍历每一列，添加折线（核心：宽格式直接绘制）
+    for col in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,          # x轴：原DF索引（日期/时间等）
+                y=df[col],           # y轴：当前列的数值
+                name=col,            # 折线名称=列名
+                mode="lines+markers",# 显示折线+数据点（更清晰）
+                hovertemplate=f"{col}: %{{y}}<br>%{{x}}<extra></extra>"  # 悬浮提示格式
+            )
+        )
+    
+    # 基础样式配置（极简但够用）
+    fig.update_layout(
+        title=title,
+        xaxis_title=df.index.name or "X轴",  # 自动取索引名作为x轴标签
+        yaxis_title="数值",
+        width=1400,
+        height=600,
+        template="plotly_white",
+        hovermode="x unified",  # 同x轴位置悬浮时显示所有列数值
+    )
+    n = len(df.index)
+    step = max(1, n // max_ticks)  # 根据数据量自动稀疏
+    # 优化x轴标签显示（避免重叠）
+    fig.update_xaxes(
+        tickangle=-45,            # 标签旋转45°
+        tickfont=dict(size=6),   # 标签字体大小
+        type="category",           # 显式指定x轴为分类轴（关键！）
+        dtick=step
+    )
+    # 显示交互图表
+    fig.show()
+
+def plot_interactive_bar_chart(df, title="净值柱状图", x_label=None, y_label="数值", max_ticks=20):
+    import pandas as pd
+    import plotly.graph_objects as go
+    """
+    基于宽格式DataFrame绘制可交互柱状图（每列一组柱子，同索引位置并列展示）
+    参数：
+        df: 输入DataFrame（索引为x轴分类，每列为一组柱子）
+        title: 图表标题（可选）
+        x_label: x轴标签（可选，默认用df索引名）
+        y_label: y轴标签（可选，默认"数值"）
+    """
+    # 初始化绘图对象
+    fig = go.Figure()
+
+    # 遍历每一列，添加柱状图系列（宽格式直接绘制）
+    for col in df.columns:
+        fig.add_trace(
+            go.Bar(
+                x=df.index,          # x轴：原DF索引（日期/分类等）
+                y=df[col],           # y轴：当前列的数值
+                name=col,            # 柱子系列名称=列名
+                opacity=0.85,        # 透明度（避免遮挡）
+                # 悬浮提示格式（显示系列名、数值、索引）
+                hovertemplate=f"{col}: %{{y:.4f}}<br>{df.index.name or '分类'}: %{{x}}<extra></extra>"
+            )
+        )
+
+    # 布局配置（适配宽画布+交互体验）
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label or df.index.name or "X轴",
+        yaxis_title=y_label,
+        width=1500,  # 宽度拉满（可根据需求调整，比如2000/3000）
+        height=600,
+        template="plotly_white",  # 清爽的浅色模板
+        barmode="group",          # 并列柱状图（核心：同x轴位置多列并列）
+        bargap=0.1,               # 不同x轴分类间的间距
+        bargroupgap=0.1,          # 同x轴分类内不同列的间距
+        # 图例放在顶部横向排列（适配宽画布）
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        hovermode="x unified"     # 鼠标悬浮时，同x轴位置的所有系列数值都显示
+    )
+
+    # 优化x轴标签显示（避免重叠）
+    fig.update_xaxes(
+        tickangle=-45,            # 标签旋转45°
+        tickfont=dict(size=6),     # 标签字体大小
+        type = "category",
+        dtick=max(1, len(df.index) // max_ticks)  # 根据数据量自动稀疏
+    )
+
+    # 显示可交互图表
+    fig.show()
+
+def plot_bar_chart(df, title="净值条形图", x_label=None, y_label="数值"):
+    """
+    基于宽格式DataFrame绘制非交互条形图（每列一组条形，同索引位置并列展示）
+    参数：
+        df: 输入DataFrame（索引为x轴分类，每列为一组条形）
+        title: 图表标题（可选）
+        x_label: x轴标签（可选，默认用df索引名）
+        y_label: y轴标签（可选，默认"数值"）
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    # 设置中文字体（避免中文乱码，根据系统调整）
+    plt.rcParams["font.sans-serif"] = ["SimHei"]  # Windows
+    # plt.rcParams["font.sans-serif"] = ["PingFang SC"]  # Mac
+    plt.rcParams["axes.unicode_minus"] = False  # 解决负号显示问题
+
+    # 初始化画布
+    fig, ax = plt.subplots(figsize=(18, 7))  
+
+    # 核心修改1：将日期索引转为字符串（消除时间轴间隔）
+    index_str = df.index.astype(str)  # 日期→字符串，作为分类标签
+    x_pos = np.arange(len(index_str))  # x轴位置仅对应有数据的索引
+
+    # 计算条形宽度和位置（实现并列显示）
+    bar_width = 0.8 / len(df.columns)  
+
+    # 遍历每一列，绘制条形
+    for i, col in enumerate(df.columns):
+        # 计算当前列条形的x轴偏移（实现并列）
+        bar_pos = x_pos + (i - len(df.columns)/2 + 0.5) * bar_width
+        # 绘制条形
+        ax.bar(
+            bar_pos, 
+            df[col].values, 
+            width=bar_width, 
+            label=col,  # 图例名称=列名
+            alpha=0.8   # 透明度（避免遮挡）
+        )
+
+    # 样式配置
+    ax.set_title(title, fontsize=16, pad=20)  # 标题
+    ax.set_xlabel(x_label or df.index.name or "X轴", fontsize=9)  # x轴标签
+    ax.set_ylabel(y_label, fontsize=12)  # y轴标签
+    ax.set_xticks(x_pos)  # x轴刻度仅对应有数据的位置
+    # 核心修改2：使用字符串化的索引作为刻度标签
+    ax.set_xticklabels(index_str, rotation=60, ha="right")  
+    ax.legend(title="数据系列", bbox_to_anchor=(1.05, 1), loc="upper left")  # 图例靠右显示
+    ax.grid(axis="y", linestyle="--", alpha=0.3)  # 显示y轴网格线
+    plt.tight_layout()  # 自动调整布局，避免标签截断
+
+    # 显示图表
+    plt.show()

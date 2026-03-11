@@ -23,7 +23,7 @@ from mapping import *
 import sys
 import polars as pl
 
-#%% 配置装饰器
+#%% 初始配置
 def timer(func):
     """计时装饰器：测量函数的执行时间"""
     @functools.wraps(func)  # 保留原函数的元数据
@@ -35,17 +35,6 @@ def timer(func):
         print(f"函数 {func.__name__} 执行耗时: {elapsed_time:.2f} 秒")
         return result
     return wrapper
-"""
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('debug.log'),
-        logging.StreamHandler()
-    ],
-    encoding='utf-8'
-)
-"""
 now_str = datetime.datetime.now().strftime('%Y-%m-%d')
 
 class TimeoutException(Exception):
@@ -101,37 +90,9 @@ def retry_with_timeout(max_retries=3, retry_interval=1, timeout=120):
         return wrapper
     return decorator
 
-import logging
-from io import StringIO
-from contextlib import contextmanager
-#上下文管理器：屏蔽正常输出和低级别日志，保留错误信息
-@contextmanager
-def suppress_non_error_output():
-    """
-    上下文管理器：屏蔽正常输出和低级别日志，保留错误信息
-    """
-    # 1. 保存原始stdout和日志配置
-    original_stdout = sys.stdout
-    original_log_level = logging.getLogger().getEffectiveLevel()
-    
-    try:
-        # 2. 重定向stdout到空缓冲区（屏蔽正常print输出）
-        sys.stdout = StringIO()
-        
-        # 3. 调整日志级别：只保留ERROR及以上（屏蔽INFO/DEBUG等）
-        logging.getLogger().setLevel(logging.ERROR)
-        
-        yield  # 执行被包裹的代码块
-        
-    finally:
-        # 4. 恢复原始配置
-        sys.stdout = original_stdout
-        logging.getLogger().setLevel(original_log_level)
 
-
-#%% 配置日志
 from fun import get_logger
-logging = get_logger('function_output.log',)
+logging = get_logger(r'log\function_output.log',)
 import builtins
 
 #%% 因子函数
@@ -345,13 +306,18 @@ class stock_api:
     def __init__(self,config = 
         {'token':'f60e5c28159d9dc4e3d51de7dd16d5e132f70841', #f60e5c28159d9dc4e3d51de7dd16d5e132f70841
         'mins_token':'fbdsJ45z9Nodp7FbUgDEsm1Oi8boH7Wuiqn7cQJnRAvs5bSwuB4e0iOBbe16ef40',
-        'ts_token':'YzAEH11Yc7jZCHjeJa63fnbpSt3k9Je3GvWn0390oiBKO95bVJjP7u5L34e2ff6b'
+        'ts_token':'5036663342330339422' #5036663342330339422
         }
         ):
+        import tushare as ts
         set_token(config['token'])
         self.config = config
         self.m_ts =tns.pro_api(config["mins_token"]) if "mins_token" in config else None
-        self.ts =tns.pro_api(config["ts_token"]) if "ts_token" in config else None
+        #self.ts =tns.pro_api(config["ts_token"]) if "ts_token" in config else None
+        self.ts=ts.pro_api('此处不用改')
+        self.ts._DataApi__token = config["ts_token"]
+        self.ts._DataApi__http_url = 'http://5k1a.xiximiao.com/dataapi'
+
 
     def convert_stock_code(self, code, to_format='gm'):
         """
@@ -903,6 +869,102 @@ class stock_api:
         index_data['trading_date'] = index_data['bob'].dt.strftime('%Y-%m-%d')
         index_data = clean_stocks_data(index_data)
         return index_data
+
+
+    def gm_add_auction(self, stock_data):
+        """
+        利用掘金接口增加早盘数据current(symbols=stock_list,include_call_auction=True),主要是获取open即可
+        分成pl和pd分别处理
+        """
+        # 将stock_data最后一天的股票代码
+        if isinstance(stock_data, pl.DataFrame):
+            stock_data = stock_data.sort(['trading_date', 'code'])
+            last_date = stock_data.select(pl.col('trading_date').max()).item()
+            stock_list = stock_data.filter(pl.col('trading_date') == last_date).select(pl.col('code')).to_series().to_list()
+
+            new_data = current(symbols=stock_list,include_call_auction=True)
+            new_data = pd.DataFrame(new_data)
+            new_data['trading_date'] = new_data['created_at']
+            # 清洗数据
+            new_data = clean_stocks_data(new_data)
+
+            # 1. 将ts_data转为Polars
+            new_data_pl = pl.from_pandas(new_data)
+            
+            # new_data_pl = new_data_pl.with_columns(
+            #     pl.col('trading_date').str.strptime(pl.Date, "%Y-%m-%d").alias('trading_date')
+            # )
+            
+            # 2. 统一所有列的数据类型（核心修复）
+            # 先获取stock_data的完整schema
+            target_schema = stock_data.schema
+            
+            # 逐个处理列：存在的列强制转换类型，不存在的列添加并设置类型
+            for col, dtype in target_schema.items():
+                if col in new_data_pl.columns:
+                    # 强制转换已有列的类型为stock_data的类型
+                    new_data_pl = new_data_pl.with_columns(
+                        pl.col(col).cast(dtype).alias(col)
+                    )
+                else:
+                    # 添加缺失列并设置类型
+                    new_data_pl = new_data_pl.with_columns(
+                        pl.lit(None, dtype=dtype).alias(col)
+                    )
+            
+            
+            # 4. 严格按照stock_data的列顺序排序
+            new_data_pl = new_data_pl.select(stock_data.columns)
+            
+            # 5. 合并
+            concat_data = stock_data.vstack(new_data_pl, in_place=False)
+            # 5. 合并并重新排序（关键：确保时间顺序正确）
+            concat_data = stock_data.vstack(new_data_pl, in_place=False)
+            concat_data = concat_data.sort(by=['code', 'trading_date'])  # 按股票+日期排序
+
+            # 6. 用前一交易日的close填充pre_close（核心修正）
+            if 'pre_close' in concat_data.columns and 'close' in concat_data.columns:
+                concat_data = concat_data.with_columns(
+                    pl.when(pl.col('pre_close').is_null())
+                    .then(pl.col('close').shift(1).over('code'))  # 取同一股票前一天的close
+                    .otherwise(pl.col('pre_close'))
+                    .alias('pre_close')
+                )
+
+            # 7.填充缺失值,[free_float_mv,name,type_name,type,industry]这些列如果有缺失,则用前一交易日的填充（核心修正）
+            need_cols = ['free_float_mv', 'name', 'type_name', 'type', 'industry']
+            for col in need_cols:
+                if col in concat_data.columns:
+                    concat_data = concat_data.with_columns(
+                        pl.col(col).fill_null(pl.col(col).shift(1).over('code')).alias(col)
+                    )
+            
+        elif isinstance(stock_data, pd.DataFrame):
+            # 1. 原始数据排序
+            stock_data_sorted = stock_data.sort_values(by=['code', 'trading_date']).reset_index(drop=True)
+            # 2. 取最后一个交易日
+            last_date = stock_data_sorted['trading_date'].unique().max()
+            # 3. 提取最后交易日的所有股票代码列表
+            stock_list = stock_data_sorted[stock_data_sorted['trading_date'] == last_date]['code'].tolist()
+
+            new_data = current(symbols=stock_list,include_call_auction=True)
+            new_data = pd.DataFrame(new_data)
+            new_data['trading_date'] = new_data['created_at']
+            # 清洗数据
+            new_data = clean_stocks_data(new_data)
+
+            # 4. 获取需要给 ts_data 补充的列（stock_data 有而 ts_data 没有的列）
+            # 使用 reindex 自动补齐并保留列顺序（pandas 会用 NaN/NaT 填充）
+            new_data = new_data.reindex(columns=stock_data.columns)
+            concat_data = pd.concat([stock_data, new_data], ignore_index=True)
+            concat_data = concat_data.sort_values(by=['code', 'trading_date'])  # 按股票+日期排序
+            
+            # 5. 用前一交易日的close填充pre_close（核心修正）
+            if 'pre_close' in concat_data.columns and 'close' in concat_data.columns:
+                concat_data['pre_close'] = concat_data.groupby('code').apply(
+                    lambda group: group['pre_close'].fillna(group['close'].shift(1))
+                ).reset_index(level=0, drop=True)  # 取同一股票前一天的close
+        return concat_data
 
     #%% 使用tushare_api
     # 获取所有股票的所有所有日期数据

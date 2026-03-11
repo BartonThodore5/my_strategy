@@ -10,6 +10,8 @@ import mapping
 import pandas as pd
 from fun import *
 import datetime as dt
+from stock_api import *
+
 ts_token = 'YzAEH11Yc7jZCHjeJa63fnbpSt3k9Je3GvWn0390oiBKO95bVJjP7u5L34e2ff6b'
 ts =tns.pro_api(ts_token)
 mins_token = 'fbdsJ45z9Nodp7FbUgDEsm1Oi8boH7Wuiqn7cQJnRAvs5bSwuB4e0iOBbe16ef40'
@@ -17,6 +19,8 @@ m_ts =tns.pro_api(mins_token)
 
 # stock_data = pl.read_parquet("stock_data_partitioned")
 # print(stock_data)  
+
+logging = get_logger(log_file='log\数据更新.log',inherit=False)
 
 mins = read_min_data(start_time=dt.datetime(2025,11,10),end_time=dt.datetime(2025,11,11))
 day = read_day_data(start_date=dt.datetime(2025,8,1),end_date=dt.datetime.today(),file_path='ts_stock_all_data')
@@ -29,8 +33,6 @@ end_date = datetime.date.today()
 # print(f"分钟数据列信息:\n {mins.schema}\n个数:{len(mins.columns)}")
                                    
 #%% 更新日线基础数据
-from stock_api import *
-from fun import *
 api = stock_api()
 #api.ts_download_date_data(filename='ts_stock_all_data(pyarrow)',start_date='2025-10-01',end_date='2025-11-11',max_workers=8)
 def update_day_data(day_data,save_dir='ts_stock_all_data',mode='insert'):
@@ -81,7 +83,7 @@ def update_day_data(day_data,save_dir='ts_stock_all_data',mode='insert'):
     new_data.write_parquet(save_dir,partition_by=['trading_date'])
 
 today = datetime.date.today()
-day = api.ts_get_stocks_data(start_date='2025-12-10',end_date=today.strftime('%Y-%m-%d'))
+day = api.ts_get_stocks_data(start_date=start_date-datetime.timedelta(days=15),end_date=today.strftime('%Y-%m-%d'))
 day = pl.from_pandas(day)
 update_day_data(day,save_dir='ts_stock_all_data')
 

@@ -189,8 +189,8 @@ def mark_limit_status(stock_data: pl.DataFrame,db_days=2) -> pl.DataFrame:
     """
     stock_data = stock_data.sort(["code", "trading_date"])
     stock_data = stock_data.with_columns([
-        ((pl.col("close") >= pl.col("limit_up") * 0.999)).alias("is_limit_up"),
-        ((pl.col("high") >= pl.col("limit_up") * 0.999) & (pl.col("close") < pl.col("limit_up") * 0.999)).alias("is_broken_limit"),
+        ((pl.col("close") >= pl.col("limit_up") * 0.999)).fill_null(False).alias("is_limit_up"),
+        ((pl.col("high") >= pl.col("limit_up") * 0.999) & (pl.col("close") < pl.col("limit_up") * 0.999)).fill_null(False).alias("is_broken_limit"),
     ])
     # 断板标记：最近3天（不含当天）有涨停，且当天未涨停也未炸板
     def mark_db(group: pl.DataFrame) -> pl.DataFrame:
@@ -314,6 +314,86 @@ def add_sma(stock_data: pl.DataFrame, window: int = 5,column:str="close") -> pl.
         pl.col(column).rolling_mean(window,min_samples=1).over("code").alias(f"sma_{window}")
     ])
 
+
+import warnings
+def mark_limit_up_down(
+    df: pl.DataFrame,
+    code_col: str = "code",    # 股票代码列名
+    close_col: str = "close",        # 当日收盘价列名
+    pre_close_col: str = "pre_close" # 昨日收盘价列名
+) -> pl.DataFrame:
+    """
+    标记沪深A股的涨跌停状态，适配Polars DataFrame
+    
+    参数:
+        df: 包含股票代码、收盘价、昨日收盘价的Polars DataFrame
+        code_col: 股票代码列名（默认"stock_code"）
+        close_col: 当日收盘价列名（默认"close"）
+        pre_close_col: 昨日收盘价列名（默认"pre_close"）
+    
+    返回:
+        新增以下列的Polars DataFrame:
+        - limit_up: 涨停价格
+        - limit_down: 跌停价格
+
+    
+    异常处理:
+        - 昨日收盘价为0/空值：标记为None，不计算涨跌停
+        - 非沪深A股（如8开头）：price_limit标记为None
+    """
+    # 深拷贝避免修改原数据
+    df_copy = df.clone()
+    
+    # 1. 定义涨跌幅限制判断逻辑
+    def get_price_limit(code: str) -> int | None:
+        if not isinstance(code, str) or len(code) < 6:
+            return None  # 无效代码
+        prefix = code[:3]  # 取前3位（覆盖300/688/003等）
+        if prefix in ["300", "688"]:
+            return 20
+        elif code[:2] in ["60", "00"]:  # 60开头/00开头（含003）
+            return 10
+        else:
+            return None  # 非沪深A股（如北交所8开头）
+    
+    # 2. 计算涨跌停价格的函数
+    def calc_limit_prices(row: pl.Series) -> tuple[float | None, float | None]:
+        pre_close = row[pre_close_col]
+        limit = row["price_limit"]
+        
+        # 异常值处理：昨日收盘价无效则返回None
+        if pre_close is None or pre_close <= 0 or limit is None:
+            return None, None
+        
+        # 涨跌停价格计算（保留2位小数，符合A股定价规则）
+        up_limit = round(pre_close * (1 + limit / 100), 2)
+        down_limit = round(pre_close * (1 - limit / 100), 2)
+        return up_limit, down_limit
+    
+    # 3. 新增涨跌幅限制列
+    df_copy = df_copy.with_columns(
+        pl.col(code_col).map_elements(get_price_limit, return_dtype=pl.Int64).alias("price_limit")
+    )
+    
+    # 4. 计算涨跌停价格
+    limit_prices = df_copy.apply(
+        calc_limit_prices,
+        return_dtype=pl.Struct([
+            pl.Field("limit_up", pl.Float64),
+            pl.Field("limit_down", pl.Float64)
+        ])
+    )
+    df_copy = df_copy.with_columns(
+        limit_prices.struct.field("limit_up").alias("limit_up"),
+        limit_prices.struct.field("limit_down").alias("limit_down")
+    )
+    
+    # 6. 警告提示：非沪深A股的数量
+    non_a_share = df_copy.filter(pl.col("price_limit").is_null()).height
+    if non_a_share > 0:
+        warnings.warn(f"发现{non_a_share}条非沪深A股数据（60/00/300/688开头），已标记为None")
+    
+    return df_copy.drop("price_limit")  # 可选：删除中间计算列
 
 def cal_limit_avg_turnover(stock_data: pl.DataFrame, window: int = 10, turnover_col: str = "turn_over") -> pl.DataFrame:
     """
